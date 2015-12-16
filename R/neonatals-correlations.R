@@ -4,60 +4,12 @@
 
 #####-----Preprocessing (after running neonatals-data-structures.R)
 
-# separate mom and baby
-df <- new_df
-
-separate_mvb <- function(df, annotation_columns, rename = TRUE){
-  
-  baby_df <- dplyr::filter(df, SampleType == "B")
-  mother_df <- dplyr::filter(df, SampleType == "M")
-  
-  # test pairs line up
-  if (identical(baby_df$Pair, mother_df$Pair)){
-    
-    # restrict to numeric columns
-    baby_df <- baby_df[, !(colnames(baby_df) %in% annotation_columns)]
-    mother_df <- mother_df[, !(colnames(mother_df) %in% annotation_columns)]
-    
-    if (rename == TRUE){
-      colnames(baby_df) <- paste(colnames(baby_df), "B", sep = "_")
-      colnames(mother_df) <- paste(colnames(mother_df), "M", sep = "_") 
-    }
-  df_list <- list(Baby = baby_df, Mother = mother_df)
-  return(df_list)
-  
-  } else {
-    print("Error: ordering doesn't match")
-  }
-  
-}
-
 output_directory <- "~/Documents/neonatal/correlation/"
 dfs <- separate_mvb(new_df, annotation_columns, rename = TRUE)
 baby_df <- dfs$Baby
 mother_df <- dfs$Mother
 
 ####-------Correlation-------------
-plot_correlations_asymmetric <- function(df1, df2, cor_threshold = 0.5, output_directory, background = "white", main_title = "basic"){
-  
-  # cluster rows and columns
-  cormat <- cor(df1, df2)
-  cormat_clustered <- cluster_matrix(cormat)
-  clust <- cormat_clustered$data
-  cormat_melted <- reshape2::melt(clust)
-  
-  # plot correlations
-  cor_plot <- qplot(x=Var1, y=Var2, data=cormat_melted, fill=value, geom="tile") +
-    scale_fill_gradient2(low = "red", high = "blue", mid = background, midpoint = 0, limits=c(-1, 1)) + theme(axis.text.x = element_text(angle = 90, hjust = 1))
-   ggsave(paste(output_directory, main_title, "correlation_map.pdf", sep = ""), plot = cor_plot, width = 40, height = 40)
-  
-  adj <- make_adjacency(clust, cor_threshold)
-  adj_melted <- reshape2::melt(adj)
-  
-  cor_plot <- qplot(x=Var1, y=Var2, data=adj_melted, fill=value, geom="tile") +
-    scale_fill_gradient2(low = "red", high = "blue", mid = background, midpoint = 0, limits=c(-1, 1)) + theme(axis.text.x = element_text(angle = 90, hjust = 1))
-  ggsave(paste(output_directory, main_title, "adj_map.pdf", sep = ""), plot = cor_plot, width = 40, height = 40)
-}
 
 plot_correlations_asymmetric(df1 = baby_df, df2 = mother_df, cor_threshold = 0.5, output_directory, background = "white", main_title = "Full_MvB_")
 
@@ -73,7 +25,6 @@ for (i in 1:length(df_names)){
   plot_correlations_asymmetric(df1, df2, cor_threshold = 0.5, output_directory, background = "white", main_title = paste(df_names[i], "_MvB_",sep=""))
   
 }
-
 
 # R values
 R_values <- sort(cormat_melted$value)
