@@ -1,0 +1,646 @@
+---
+title: "Neonatal Analysis"
+author: "GK Fragiadakis"
+date: "March 15, 2016"
+output: html_document
+---
+
+This document chronicles the analysis from the data as it is exported as median signaling and event counts from nolanlab.cytobank.org.  
+
+## Cleaning the data
+
+Load the necessary packages: 
+```{r message = FALSE}
+library(dplyr)
+library(reshape2)
+library(tidyr)
+library(blackbuck)
+library(FDAlibrary)
+library(ggplot2)
+library(samr)
+```
+Load the signaling data: 
+```{r}
+setwd("~/Documents/neonatal")
+dataDirectory <- "./exported_statistics/"
+raw_df <- read.csv(paste(dataDirectory, "neonatals-medians.csv", sep = ""))
+figure_directory <- "./figure_graphs/"
+```
+Clean Cytobank output for our uses.  
+```{r}
+raw_df <- raw_df %>%
+  tidyr::separate(col = Conditions, into = c("SampleType", "Conditions"), sep = "_") %>%
+  dplyr::select(-(FCS.Filename)) %>%
+  dplyr::rename(Pair = Individuals) %>%
+  dplyr::mutate(Individual = as.factor(paste(Pair, SampleType, sep = "_"))) %>%
+  dplyr::rename(Condition = Conditions) %>%
+  dplyr::select(-contains("Singlets")) %>%
+  dplyr::select(-contains("Mononuclear"))
+annotation_columns = c("Individual", "Pair","SampleType", "Condition")
+```
+Now we have the following attributes as columns  
+
+* Individual = which subject
+* Pair = which mother-baby pair the subject belongs to (e.g. uc01)
+* SampleType = mother or baby (B or M)
+* Condition = stimulation condition (Unstim, LPS, or Cocktail)
+
+Name cleaning: 
+
+```{r echo = FALSE}
+old_names <- colnames(raw_df)[!colnames(raw_df) %in% annotation_columns]
+
+names_key <- as.list(old_names)
+names(names_key) <- old_names
+
+names_key <- gsub(pattern = "Medians_", replacement = "", names_key)
+names_key <- gsub(pattern = "_.*Di...", replacement = "_", names_key)
+names_key <- gsub(pattern = "ERK1.2", replacement = "ERK", names_key)
+
+
+# population names
+NKbrights <- grep(pattern = "..1", names_key, fixed = TRUE)
+names_key[NKbrights] <- gsub(pattern = "NKCD56.CD16.", replacement = "CD56hi_NK_cells", names_key[NKbrights])
+names_key[NKbrights] <- gsub(pattern = "..1", replacement = "", names_key[NKbrights], fixed = TRUE)
+names_key <- gsub(pattern = "NKCD56.CD16.", replacement = "CD56lo_NK_cells", names_key)
+names_key <- gsub(pattern = "NaiveCD8.TcellsCD45RA.", replacement = "Naive_CD8_T_cells", names_key)
+names_key <- gsub(pattern = "MemoryCD8.TcellsCD45RA.", replacement = "Memory_CD8_T_cells", names_key)
+names_key <- gsub(pattern = "NaiveCD4.TCellsCD45RA.", replacement = "Naive_CD4_T_cells", names_key)
+names_key <- gsub(pattern = "Memory.CD4..TcellsCD45RA.", replacement = "Memory_CD4_T_cells", names_key)
+names_key <- gsub(pattern = "CD8.Tcell", replacement = "CD8_T_cells", names_key)
+names_key <- gsub(pattern = "CD4.TCell", replacement = "CD4_T_cells", names_key)
+names_key <- gsub(pattern = "Th1Tbet.CD4.", replacement = "Th1_T_cells", names_key)
+names_key <- gsub(pattern = "gdTcells", replacement = "gd_T_cells", names_key)
+names_key <- gsub(pattern = "BCellsCD19.IgM.CD3.", replacement = "B_cells", names_key)
+names_key <- gsub(pattern = "ClassicalMonocytesCD14.CD16.", replacement = "Classical_monocytes", names_key)
+names_key <- gsub(pattern = "Non.ClassicalMonocytesCD16.CD14.", replacement = "Nonclassical_monocytes", names_key)
+names_key <- gsub(pattern = "IntermediateMonocytesCD14.CD16.", replacement = "Intermediate_monocytes", names_key)
+names_key <- gsub(pattern = "M.MDSCs", replacement = "MDSCs", names_key)
+names_key <- gsub(pattern = "cDCCD11c.HLA.DRhigh", replacement = "cDCs", names_key)
+names_key <- gsub(pattern = "PlasmacytoidDCsHLA.DR.CD123.", replacement = "pDCs", names_key)
+
+# remove . at the end
+names_key <- gsub(pattern = ".", replacement = "", names_key, fixed = TRUE)
+names(names_key) <- old_names
+
+## replacing the names in raw_df:
+replace_names <- function(names_key, df){
+for (i in names(names_key)){
+  if (i %in% colnames(df)){
+    names(df)[names(df) == i] <- names_key[[i]]
+  }
+}
+return(df)
+}
+
+raw_df <- replace_names(names_key, raw_df)
+
+```
+
+Generate fold change data (arcsinh ratio) for LPS and cocktail:
+```{r message = FALSE}
+fold_df <- get_folds(raw_df, basal_name = "unstim", fold_type = "asinh", unique_IDs = "filename",
+                     annotation_columns = annotation_columns)
+LPS_df <- dplyr::filter(fold_df, Condition == "LPS")
+Cocktail_df <- dplyr::filter(fold_df, Condition == "Cocktail")
+```
+
+And select and transform the unstim data: 
+```{r message = FALSE}
+unstim_df <- dplyr::filter(raw_df, Condition == "unstim")
+unstim_df <- reshape2::melt(unstim_df)
+unstim_df$value <- asinh(unstim_df$value / 5)
+unstim_df <- reshape2::dcast(unstim_df, ... ~ variable)
+unstim_df <- dplyr::select(unstim_df, -filename)
+Unstim_df <- unstim_df
+```
+Now we have data frames corresponding to each condition (Unstim_df, LPS_df, and Cocktail_df) to work with in the analysis.  
+
+We additionally want to load and clean the abundance data and calculate percent totals.  
+
+```{r}
+setwd("~/Documents/neonatal/")
+abundance_df <- read.csv(paste(dataDirectory, "neonatals-abundances.csv", sep = ""))
+abundance_df <- abundance_df %>%
+  tidyr::separate(col = Conditions, into = c("SampleType", "Conditions"), sep = "_") %>%
+  dplyr::select(-(FCS.Filename)) %>%
+  dplyr::rename(Pair = Individuals) %>%
+  dplyr::mutate(Individual = as.factor(paste(Pair, SampleType, sep = "_"))) %>%
+  dplyr::rename(Condition = Conditions)  %>%
+  dplyr::filter(Condition == "unstim")
+```
+
+Calculate percentages:
+```{r}
+base_counts <- abundance_df$Mononuclearcells_EventCounts
+singlet_counts <- abundance_df$Singlets_EventCounts
+cell_types <- abundance_df[,!(names(abundance_df) %in% c(annotation_columns, 
+                                                         "Singlets_EventCounts", 
+                                                         "Mononuclearcells_EventCounts", 
+                                                         "Granulocytes_EventCounts", "filename"))]
+grans <- abundance_df$Granulocytes_EventCounts
+percents <- cbind(cell_types/base_counts, Granulocytes_EventCounts = grans/singlet_counts)
+percents_df <- data.frame(filename = abundance_df$filename, abundance_df[, colnames(abundance_df) %in% annotation_columns], percents)
+# write.csv(percents_df, file = "~/Documents/neonatal/neonatals_percentages.csv")
+```
+
+Now the data frame percents_df has the percent totals of all populations as percentage of mononuclear cells, with the exception of granulocytes which are as a percent of singlets.  
+
+Name cleaning for abundances: 
+
+```{r echo = FALSE}
+old_names <- colnames(percents_df)[!colnames(percents_df) %in% annotation_columns]
+names_key <- as.list(old_names)
+names(names_key) <- old_names
+
+# population names
+NKbrights <- grep(pattern = "EventCounts.1", names_key, fixed = TRUE)
+names_key[NKbrights] <- gsub(pattern = "NKCD56.CD16.", replacement = "CD56hi_NK_cells", names_key[NKbrights])
+names_key[NKbrights] <- gsub(pattern = ".1", replacement = "", names_key[NKbrights], fixed = TRUE)
+names_key <- gsub(pattern = "NKCD56.CD16.", replacement = "CD56lo_NK_cells", names_key)
+names_key <- gsub(pattern = "NaiveCD8.TcellsCD45RA.", replacement = "Naive_CD8_T_cells", names_key)
+names_key <- gsub(pattern = "MemoryCD8.TcellsCD45RA.", replacement = "Memory_CD8_T_cells", names_key)
+names_key <- gsub(pattern = "NaiveCD4.TCellsCD45RA.", replacement = "Naive_CD4_T_cells", names_key)
+names_key <- gsub(pattern = "Memory.CD4..TcellsCD45RA.", replacement = "Memory_CD4_T_cells", names_key)
+names_key <- gsub(pattern = "CD8.Tcell", replacement = "CD8_T_cells", names_key)
+names_key <- gsub(pattern = "CD4.TCell", replacement = "CD4_T_cells", names_key)
+names_key <- gsub(pattern = "Th1Tbet.CD4.", replacement = "Th1_T_cells", names_key)
+names_key <- gsub(pattern = "gdTcells", replacement = "gd_T_cells", names_key)
+names_key <- gsub(pattern = "BCellsCD19.IgM.CD3.", replacement = "B_cells", names_key)
+names_key <- gsub(pattern = "ClassicalMonocytesCD14.CD16.", replacement = "Classical_monocytes", names_key)
+names_key <- gsub(pattern = "Non.ClassicalMonocytesCD16.CD14.", replacement = "Nonclassical_monocytes", names_key)
+names_key <- gsub(pattern = "IntermediateMonocytesCD14.CD16.", replacement = "Intermediate_monocytes", names_key)
+names_key <- gsub(pattern = "M.MDSCs", replacement = "MDSCs", names_key)
+names_key <- gsub(pattern = "cDCCD11c.HLA.DRhigh", replacement = "cDCs", names_key)
+names_key <- gsub(pattern = "PlasmacytoidDCsHLA.DR.CD123.", replacement = "pDCs", names_key)
+names_key <- gsub(pattern = "EventCounts", replacement = "Percent_Total", names_key)
+names(names_key) <- old_names
+percents_df <- replace_names(names_key, percents_df)
+percents <- replace_names(names_key, percents)
+```
+
+## Frequency differences between Mom and Baby populations using SAM paired
+
+Generate response varaible y for Two Class Paired (Mom and Baby)
+```{r}
+# SAMDirectory <- "~/Documents/neonatal/SAM/"
+y <- dplyr::select(unstim_df, Pair, SampleType)
+y <- cbind(y, resp = rep(1:10, each  = 2))
+for (i in 1:nrow(y)){
+  if ( y[i, "SampleType"] == "B"){
+    y[i, "resp"] <- -(y[i, "resp"])
+  }
+}
+y <- y$resp
+```
+Run SAM model 
+```{r}
+# generated percents_df (includes annotations) and percents (numeric only) 
+x <- percents
+runSAM <- function(){
+  sink("/dev/null")
+model <-  SAM(t(x), y, genenames = colnames(x), resp.type = "Two class paired", nperms = 1000, fdr.output = 0.01)
+sink()
+return(model)
+}
+model <- runSAM()
+sig.up <- model$siggenes.table$genes.up[model$siggenes.table$genes.up[,"q-value(%)"] == "0", ]
+# Higher in Mom
+print(sig.up)
+sig.lo <- model$siggenes.table$genes.lo[model$siggenes.table$genes.lo[,"q-value(%)"] == "0", ]
+# Higher in Baby
+print(sig.lo)
+sigs <- rbind(sig.up, sig.lo)
+# write.csv(sigs, file = paste(SAMDirectory,  "percent_mononuclear_fdr_0.01.csv", sep = ""))
+
+df <- percents_df
+sig_df <- data.frame(sigs)
+feat_vals <- cbind(Individual = df$Individual, df[, colnames(df) %in% sig_df$Gene.ID])
+# write.csv(feat_vals, file = paste(SAMDirectory, "percent_mononuclear_feature_values_fdr_0.01.csv", sep = ""))
+
+df <- melt(df)
+df <- df[df[, "variable"] %in% sig_df$Gene.ID,]
+ggplot(df, aes(variable, value)) + geom_boxplot(aes(colour = SampleType)) + ggtitle("Abundance differences (% Mononuclear cells)") + coord_flip()
+# log scale
+ggplot(df, aes(variable, log10(value))) + geom_boxplot(aes(colour = SampleType)) + ggtitle("Abundance differences (% Mononuclear cells)") + coord_flip() + scale_color_brewer(palette = "Dark2") + theme_bw()
+# #ggsave(filename = paste(figure_directory, "abundances_sig_plot.pdf", sep = ""), width = 10, height = 10,  useDingbats=FALSE)
+
+# #ggsave(filename = paste(figure_directory, "abundances_sig_plot2.pdf", sep = ""), width = 30, height = 20,  useDingbats=FALSE)
+
+# plot all
+df <- percents_df
+df <- reshape2::melt(df)
+ggplot(df, aes(variable, value)) + geom_boxplot(aes(colour = SampleType)) + ggtitle("Abundance differences (% Mononuclear cells)") + coord_flip()
+# log scale
+ggplot(df, aes(variable, log10(value))) + geom_boxplot(aes(colour = SampleType)) + ggtitle("Abundance differences (% Mononuclear cells)") + coord_flip() + scale_color_brewer(palette = "Dark2") + theme_bw()
+# #ggsave(filename = paste(SAMDirectory, "percent_mononuclear_all_plot.pdf", sep = ""), width = 30, height = 20)
+```
+Features that are not significant based on the estimated Q-val = 0: 
+```{r}
+not_sig <- percents_df[,!(colnames(percents_df) %in% sig_df$Gene.ID)]
+colnames(dplyr::select(not_sig, contains("EventCounts")))
+```
+Might want to include Scaffold in this figure.  
+
+Confidence intervals: (1 is significant, i.e. interval does not include zero)
+```{r}
+mom_df <- percents_df %>% dplyr::filter(SampleType == "M") %>% dplyr::select(-filename, -Pair, -SampleType, -Condition, -Individual)
+baby_df <- percents_df %>% dplyr::filter(SampleType == "B") %>% dplyr::select(-filename, -Pair, -SampleType, -Condition, -Individual)
+conf_int <- mapply(function(x, y) t.test(x,y, paired = TRUE)$conf.int[1:2], mom_df, baby_df)
+conf_int <- t(conf_int)
+colnames(conf_int) <- c("lower_bound", "upper_bound")
+interval_no_zero <- sign(conf_int[, "lower_bound"]) == sign(conf_int[, "upper_bound"])
+cbind(conf_int, interval_no_zero)
+```
+
+## Examining signaling variance with PCA
+Running PCA on entire signaling dataset: 
+```{r}
+dfs <- list("LPS" = LPS_df, "Cocktail" = Cocktail_df, "Unstim" = Unstim_df)
+df <- do.call(cbind, args = dfs)
+df_num <- df %>% dplyr::select(-contains("Individual"), -contains("Pair"), - contains("SampleType"), -contains("Condition"))
+x <- as.matrix(df_num)
+
+pr.out <- prcomp(x, scale = FALSE)
+transformed_x <- pr.out$x
+PC_df <- data.frame(transformed_x, Individual = unstim_df$Individual, SampleType = unstim_df$SampleType, Pair = unstim_df$Pair)
+loadings1 <- pr.out$rotation[, "PC1"]
+loadings2 <- pr.out$rotation[, "PC2"]
+```
+
+Plotting PCA, coloring by population shows that PC1 separates the Mom and Baby populations:
+```{r}
+# plotting
+pca <- ggplot(PC_df, aes(PC1, PC2, group = Pair))
+pca + geom_point(size = 2, aes(colour = SampleType)) + scale_color_brewer(palette = "Dark2") + theme_bw() + ggtitle("PCA by population")
+#ggsave(paste(figure_directory, "PCA_by_population.pdf"), width = 5, height = 4,  useDingbats=FALSE)
+```
+
+PC2 separates by pair:
+```{r}
+pca + geom_point(size = 2, aes(colour = Pair)) + ggtitle("PCA by mom-baby pair") + geom_line(aes(colour = Pair))
+# #ggsave(paste(pairedDirectory, "PCA_by_pair.pdf"))
+
+PC_df$Pair = factor(PC_df$Pair,levels(PC_df$Pair)[order(dplyr::filter(PC_df, SampleType == "M")$PC2)])
+pca <- ggplot(PC_df, aes(Pair, PC2))
+pca + geom_point(size = 2, aes(colour = Pair)) + ggtitle("PCA paired")
+# #ggsave(paste(pairedDirectory, "PCA_by_pair_2.pdf"))
+```
+
+Variance explained by each PCA: 
+```{r}
+summary(pr.out)
+```
+
+Loadings of PC1 (highest 10):
+```{r}
+print(sort(loadings1, decreasing = TRUE)[1:10])
+```
+
+Loadings of PC2 (highest 10):
+```{r}
+print(sort(loadings2, decreasing = TRUE)[1:10])
+```
+
+
+
+## Figure 3: Signaling Differences between Mom and Baby (SAM paired)
+
+The basal condition reflects what is occuring at steady state (versus stimulated).  We additionally have the stimulated conditions (LPS and Cocktail).  
+
+
+```{r}
+dfs <- list("LPS" = LPS_df, "Cocktail" = Cocktail_df, "Unstim" = Unstim_df)
+neonatal_SAM <- function(dfs, y, resp.type, SAMDirectory){
+  output <- list()
+  for (i in 1:length(dfs)){
+    df <- dfs[[i]]
+    x <- df[,!(names(df) %in% annotation_columns)]
+    sink("/dev/null")
+    model <-  SAM(t(x), y, genenames = colnames(x), resp.type = resp.type, nperms = 1000, fdr.output = 0.01)
+    sink()
+    sig.up <- model$siggenes.table$genes.up[model$siggenes.table$genes.up[,"q-value(%)"] == "0", ]
+    
+    
+    sig.lo <- model$siggenes.table$genes.lo[model$siggenes.table$genes.lo[,"q-value(%)"] == "0", ]
+
+    sigs <- rbind(sig.up, sig.lo)
+    # write.csv(sigs, file = paste(SAMDirectory, names(dfs)[i], "_fdr_0.01.csv", sep = ""))
+    output[[names(dfs)[i]]] <- sigs
+    
+    sig_df <- data.frame(sigs)
+    feat_vals <- cbind(Individual = df$Individual, df[, colnames(df) %in% sig_df$Gene.ID])
+    # write.csv(feat_vals, file = paste(SAMDirectory, names(dfs)[i], "_feature_values_fdr_0.01.csv", sep = ""))
+    
+    df <- melt(df)
+    df <- df[df[, "variable"] %in% sig_df$Gene.ID,]
+    p <- ggplot(df, aes(variable, value)) + geom_boxplot(aes(colour = SampleType)) + ggtitle(names(dfs)[i]) + coord_flip() + theme(axis.text = element_text(size = 5))
+    print(p)
+    # #ggsave(filename = paste(SAMDirectory, names(dfs)[i], "_sig_plot.pdf", sep = ""), width = 30, height = 20)
+    print(names(dfs)[i])
+    print("Higher in Mother")
+    print(sig.up[, "Gene ID"])
+    print("Higher in Baby")
+    print(sig.lo[, "Gene ID"])
+  }
+  return(output)
+}
+
+paired_output <- neonatal_SAM(dfs, y, resp.type = "Two class paired", SAMDirectory = "./SAM/")
+```
+
+
+### Figure 4: Filtering the Signaling Condition features by mean induction
+For both stimulation conditions, there are many hits, and we may want to highlight a few based on effect size.  Each stimulation has a different effect size.  Here we plot all the means of the significant features in the LPS condition:
+```{r}
+sig_LPS <- LPS_df[, colnames(LPS_df) %in% paired_output$LPS[, "Gene ID"] ]
+means <- apply(sig_LPS, 2, mean)
+plot(sort(means), main = "LPS significant means, sorted")
+# pdf(paste(figure_directory, "LPS_sorted_abs_all.pdf", sep = ""),width = 6,height = 4, useDingbats=FALSE)
+plot(sort(abs(means)), main = "LPS significant means, sorted", pch = 20)
+abline(a = 0.1, b = 0, col = "red", lwd = 2)
+dev.off()
+```
+
+Therefore if we set a cutoff of an induction of 0.1, we filter out the near-zero conditions and return the following features: 
+```{r}
+sig_feat_thresholded <- names(means[abs(means) > 0.1])
+
+
+
+df <- melt(LPS_df)
+df <- df[df[, "variable"] %in% sig_feat_thresholded,]
+ggplot(df, aes(variable, value)) + geom_boxplot(aes(colour = SampleType)) + ggtitle("LPS thresholded") + coord_flip() + theme(axis.text = element_text(size = 5)) + scale_color_brewer(palette = "Dark2") + theme_bw()
+# #ggsave(paste(figure_directory, "LPS_high_in_mom.pdf", sep = ""), width = 10, height = 10, useDingbats=FALSE)
+print(sig_feat_thresholded)
+# write.csv(sig_feat_thresholded, file = "~/Documents/neonatal/for_brice/LPS_SAM_higher_in_mom.csv")
+```
+All of these tend to be myeloid cells (Granulocytes, Monocyte subsets, DC subsets) signaling in MAPAKPK2, P38, CREB, ERK, S6, STAT1, IkB/NFkB.  In addition, all of these are higher in mom (meaning mom has a higher innate immune signaling capacity than baby by our measurements). 
+
+We similarly can plot the Cocktail feature means to see the magnitude of induction: 
+```{r}
+df <- Cocktail_df
+sig_feats <- df[, colnames(df) %in% paired_output$Cocktail[, "Gene ID"] ]
+means <- apply(sig_feats, 2, mean)
+plot(sort(means), main = "Cocktail significant means, sorted")
+
+#pdf(paste(figure_directory, "Cocktail_sorted.pdf", sep = ""),width = 6,height = 4, useDingbats=FALSE)
+#plot(sort(means), main = "Cocktail significant means, sorted", pch = 20)
+#abline(a = 1, b = 0, col = "red", lwd = 2)
+#dev.off()
+```
+Here we see a break point at arcsinh ratio of 1.0.  We can filter there and get the following:
+```{r}
+sig_feat_thresholded <- names(means[abs(means) > 1])
+df <- melt(Cocktail_df)
+df <- df[df[, "variable"] %in% sig_feat_thresholded,]
+p <- ggplot(df, aes(variable, value)) + geom_boxplot(aes(colour = SampleType)) + ggtitle("Cocktail") + coord_flip() + theme(axis.text = element_text(size = 5))
+print(p)
+print(sig_feat_thresholded)
+```
+This is list now contains a variety of both innate and adaptive cell types but all are pSTAT1, pSTAT3, and pSTAT5 signaling.  Here's if we look at only what's higher in mom v. only what's higher in baby:
+
+```{r}
+m <- dplyr::filter(df, SampleType == "M")
+m_by <- dplyr::group_by(m, variable)
+m_mean <- summarise(m_by, mean_val = mean(value))
+
+b <- dplyr::filter(df, SampleType == "B")
+b_by <- dplyr::group_by(b, variable)
+b_mean <- summarise(b_by, mean_val = mean(value))
+
+# higher in mother
+m_df <- m_mean$variable[m_mean$mean_val > b_mean$mean_val]
+# write.csv(m_df, file = "~/Documents/neonatal/for_brice/Cocktail_SAM_higher_in_mom.csv")
+df <- melt(Cocktail_df)
+df <- df[df[, "variable"] %in% m_df,]
+
+p <- ggplot(df, aes(variable, value)) + geom_boxplot(aes(colour = SampleType)) + ggtitle("Cocktail, thresholded, higher in mother") + coord_flip() + theme(axis.text = element_text(size = 5)) + scale_color_brewer(palette = "Dark2") + theme_bw()
+print(p)
+# #ggsave(paste(figure_directory, "Cocktail_high_in_mom.pdf", sep = ""), width = 10, height = 10, useDingbats=FALSE)
+
+
+# higher in baby
+b_df <- m_mean$variable[m_mean$mean_val < b_mean$mean_val]
+# write.csv(b_df, file = "~/Documents/neonatal/for_brice/Cocktail_SAM_higher_in_baby.csv")
+
+df <- melt(Cocktail_df)
+df <- df[df[, "variable"] %in% b_df,]
+
+p <- ggplot(df, aes(variable, value)) + geom_boxplot(aes(colour = SampleType)) + ggtitle("Cocktail, thresholded, higher in baby") + coord_flip() + theme(axis.text = element_text(size = 5)) + scale_color_brewer(palette = "Dark2") + theme_bw()
+print(p)
+# #ggsave(paste(figure_directory, "Cocktail_high_in_baby.pdf", sep = ""), width = 10, height = 10, useDingbats=FALSE)
+
+```
+It looks like all of the higher in baby are adaptive features, whereas most of the higher in mom and innate features. 
+
+## Sorting the Unstimulated condition based on the average difference between mom and baby
+In this case we do not have an induction over baseline, therefore to examine the significant features we order them by the size of the difference between mom and baby: 
+```{r}
+df <- Unstim_df
+sig_feats <- df[, colnames(df) %in% paired_output$Unstim[, "Gene ID"] ]
+sig_feats[["SampleType"]] <- Unstim_df$SampleType
+M_feats <- sig_feats %>% dplyr::filter(SampleType == "M") %>% dplyr::select(-SampleType)
+B_feats <- sig_feats %>% dplyr::filter(SampleType == "B") %>% dplyr::select(-SampleType)
+M_means <- apply(M_feats, 2, mean)
+B_means <- apply(B_feats, 2, mean)
+Diff_means <- M_means - B_means
+# plot(sort(Diff_means), main = "Mean differences in unstimulated")
+plot(sort(abs(Diff_means)),  main = "Mean differences in unstimulated (absolute value)")
+```
+
+Here we use a cut of 0.3 in magnitude based on where the slope changes:
+```{r}
+#pdf(paste(figure_directory, "Unstim_sorted.pdf", sep = ""),width = 6,height = 4, useDingbats=FALSE)
+#plot(sort(abs(Diff_means)), main = "Mean differences in unstimulated (absolute value)", pch = 20)
+#abline(a = 0.3, b = 0, col = "red", lwd = 2)
+#dev.off()
+sig_feat_thresholded <- names(Diff_means[abs(Diff_means) > 0.3])
+df <- melt(Unstim_df)
+df <- df[df[, "variable"] %in% sig_feat_thresholded,]
+p <- ggplot(df, aes(variable, value)) + geom_boxplot(aes(colour = SampleType)) + ggtitle("Unstim_thresholded") + coord_flip() + theme(axis.text = element_text(size = 5))
+print(p)
+print(sig_feat_thresholded)
+```
+
+Here we can also split into higher in mom v. higher in baby (Unstim):
+```{r}
+df <- df[df[, "variable"] %in% sig_feat_thresholded,]
+m <- dplyr::filter(df, SampleType == "M")
+m_by <- dplyr::group_by(m, variable)
+m_mean <- summarise(m_by, mean_val = mean(value))
+
+b <- dplyr::filter(df, SampleType == "B")
+b_by <- dplyr::group_by(b, variable)
+b_mean <- summarise(b_by, mean_val = mean(value))
+
+# higher in mother
+m_df <- m_mean$variable[m_mean$mean_val > b_mean$mean_val]
+# write.csv(m_df, file = "~/Documents/neonatal/for_brice/Unstim_SAM_higher_in_mom.csv")
+
+df <- melt(Unstim_df)
+df <- df[df[, "variable"] %in% m_df,]
+
+p <- ggplot(df, aes(variable, value)) + geom_boxplot(aes(colour = SampleType)) + ggtitle("Unstim, thresholded, higher in mother") + coord_flip() + theme(axis.text = element_text(size = 5)) + scale_color_brewer(palette = "Dark2") + theme_bw()
+print(p)
+# #ggsave(paste(figure_directory, "Unstim_high_in_mother.pdf", sep = ""), width = 10, height = 10, useDingbats=FALSE)
+
+
+
+# higher in baby
+b_df <- m_mean$variable[m_mean$mean_val < b_mean$mean_val]
+# write.csv(b_df, file = "~/Documents/neonatal/for_brice/Unstim_SAM_higher_in_baby.csv")
+
+df <- melt(Unstim_df)
+df <- df[df[, "variable"] %in% b_df,]
+
+p <- ggplot(df, aes(variable, value)) + geom_boxplot(aes(colour = SampleType)) + ggtitle("Unstim, thresholded, higher in baby") + coord_flip() + theme(axis.text = element_text(size = 5)) + scale_color_brewer(palette = "Dark2") + theme_bw()
+print(p)
+# #ggsave(paste(figure_directory, "Unstim_high_in_baby.pdf", sep = ""), width = 10, height = 10, useDingbats=FALSE)
+
+```
+### *Compairson* Look at SAM unpaired results:
+
+```{r echo = FALSE}
+y_unpaired <- rep(1:2, 10)
+dfs <- list("LPS" = LPS_df, "Cocktail" = Cocktail_df, "Unstim" = Unstim_df)
+unpaired_output <- neonatal_SAM(dfs, y = y_unpaired, resp.type = "Two class unpaired", SAMDirectory = "./SAM/")
+```
+
+
+## Figure 5 Paired analysis: the value added by having pair-specific information
+Here we examine the added value of having paired samples (samples from a mother-baby pair as opposed to a random sample) by comparing the p-values from unpaired v. paired t-tests.  
+*New* Here we also compare to doing the significance cutoff as whether SAM paired v. unpaired found it as significant. We should use SAM throughout
+Here's when we do it with all the signaling data combined (original analysis: Unstim, Cocktail, LPS)
+
+```{r}
+# a function to calculate significance from SAM output
+SAM_significance <- function(paired_output, unpaired_output, unpaired_pvals){
+  
+  get_genes <- function(output){
+    all_genes <- c()
+    for (i in 1:length(output)){
+      genes <- output[[i]][, "Gene ID"]
+      gene_names <- paste(names(output)[i], genes, sep = ".")
+      all_genes <- c(all_genes, gene_names)
+    }
+    return(all_genes)
+  }
+  sig_paired <- get_genes(paired_output)
+  print(sig_paired)
+  sig_unpaired <- get_genes(unpaired_output)
+  print(sig_unpaired)
+
+  yes_p <- names(unpaired_pvals) %in% sig_paired
+  print(yes_p)
+  yes_up <- names(unpaired_pvals) %in% sig_unpaired
+  print(yes_up)
+  
+  significance <- vector(mode = "character", length = length(unpaired_pvals))
+  significance[yes_p & yes_up] <- "Both"
+  significance[!(yes_p) & yes_up] <- "Unpaired only"
+  significance[yes_p & !(yes_up)] <- "Paired only"
+  significance[!(yes_p) & !(yes_up)] <- "Not significant"
+  
+  return(significance)
+}
+```
+
+```{r}
+# pairedDirectory <- "~/Documents/neonatal/paired/"
+sampleType <- Unstim_df$SampleType
+
+plot_p_v_up <- function(dfs, sampleType, paired_output, unpaired_output){
+df <- do.call(cbind, args = dfs)
+df[["SampleType"]] <- sampleType
+mom_df <- df %>% dplyr::filter(SampleType == "M") %>% dplyr::select(-contains("Individual"), -contains("Pair"), - contains("SampleType"), -contains("Condition"))
+baby_df <- df %>% dplyr::filter(SampleType == "B") %>%  dplyr::select(-contains("Individual"), -contains("Pair"), - contains("SampleType"), -contains("Condition"))
+
+paired_pvals <- mapply(function(x, y) t.test(x,y, paired = TRUE)$p.value, mom_df, baby_df)
+unpaired_pvals <- mapply(function(x, y) t.test(x,y, paired = FALSE)$p.value, mom_df, baby_df)
+
+# plot(-log(unpaired_pvals), -log(paired_pvals))
+
+# Number of comparisons: 20 cell types x 10 phosphos x 3 conditions
+bonf <- .05/(ncol(mom_df))
+
+significance <- vector(mode = "character", length = length(unpaired_pvals))
+significance[(unpaired_pvals < bonf) & (paired_pvals < bonf)] <- "Both"
+significance[(unpaired_pvals < bonf) & (paired_pvals > bonf)] <- "Unpaired only"
+significance[(unpaired_pvals > bonf) & (paired_pvals < bonf)] <- "Paired only"
+significance[(unpaired_pvals > bonf) & (paired_pvals > bonf)] <- "Not significant"
+
+Significance_SAM <- SAM_significance(paired_output, unpaired_output, unpaired_pvals)
+
+plot_df <- data.frame(unpaired_pvals, paired_pvals, Significance_Bonferroni = significance, Significance_SAM = Significance_SAM, Features = names(paired_pvals))
+
+p <- ggplot(plot_df, aes(-log(unpaired_pvals), -log(paired_pvals))) + 
+  geom_point(size = 1, aes(colour = Significance_Bonferroni))  + 
+  scale_color_manual(values=c("blue", " dark gray", "red", "orange"))
+print(p)
+
+p <- ggplot(plot_df, aes(-log(unpaired_pvals), -log(paired_pvals))) + 
+  geom_point(size = 1, aes(colour = Significance_SAM))  + 
+  scale_color_manual(values=c("#1b9e77", " dark gray", "#7570b3", "#d95f02")) + ggtitle("Using SAM Significance") + theme_bw()
+print(p)
+# (paste(figure_directory, "scatter_paired_v_unpaired.pdf", sep = ""), width = 8, height = 7,useDingbats=FALSE)
+# #ggsave(paste(pairedDirectory, "scatter_paired_unpaired.pdf", sep = ""))
+# plot_df %>% dplyr::filter(Significance_SAM != "Not significant") %>% 
+  # dplyr::select(-unpaired_pvals) %>%
+  # dplyr::select(-paired_pvals)
+return(plot_df)
+}
+
+plot_df <- plot_p_v_up(dfs = list("LPS" = LPS_df, "Cocktail" = Cocktail_df, "Unstim" = Unstim_df), sampleType = sampleType, paired_output, unpaired_output)
+
+test <- strsplit(as.character(plot_df$Features), "[.]")
+plot_df_new <- data.frame(plot_df, Condition = sapply(test, function(x) x[[1]]))
+levels(plot_df_new$Condition) <- c(levels(plot_df_new$Condition), "Not Significant")
+plot_df_new[plot_df_new$Significance_SAM == "Not significant", "Condition"] <- "Not Significant"
+ggplot(plot_df_new, aes(-log(unpaired_pvals), -log(paired_pvals))) + 
+  geom_point(size = 1, aes(colour = Condition))  + 
+  scale_color_manual(values=c("#1b9e77", "#d95f02", "#7570b3", "dark grey")) + ggtitle("Colored by condition") + theme_bw()
+# #ggsave(paste(figure_directory, "scatter_by_stim.pdf"), width = 8, height = 7, useDingbats=FALSE)
+```
+
+Here's for Unstim only: 
+```{r}
+plot_p_v_up(dfs = list("Unstim" = Unstim_df), sampleType = sampleType, paired_output = list("Unstim" = paired_output$Unstim), unpaired_output = list("Unstim" = unpaired_output$Unstim))
+```
+
+Here's for LPS and Cocktail only:
+```{r}
+plot_p_v_up(dfs = list("LPS" = LPS_df, "Cocktail" = Cocktail_df), sampleType = sampleType,  paired_output = list("LPS" = paired_output$LPS, "Cocktail" = paired_output$Cocktail), unpaired_output = list("LPS" = unpaired_output$LPS, "Cocktail" = unpaired_output$Cocktail))
+
+```
+
+For abundance:
+
+```{r}
+# for abundance version
+mom_df <- percents_df %>% dplyr::filter(SampleType == "M") %>% dplyr::select(-filename, -Pair, -SampleType, -Condition, -Individual)
+baby_df <- percents_df %>% dplyr::filter(SampleType == "B") %>% dplyr::select(-filename, -Pair, -SampleType, -Condition, -Individual)
+paired_pvals <- mapply(function(x, y) t.test(x,y, paired = TRUE)$p.value, mom_df, baby_df)
+unpaired_pvals <- mapply(function(x, y) t.test(x,y, paired = FALSE)$p.value, mom_df, baby_df)
+
+# plot(-log(unpaired_pvals), -log(paired_pvals))
+
+# Number of comparisons: 20 cell types x 10 phosphos x 3 conditions
+bonf <- .05/(ncol(mom_df))
+
+significance <- vector(mode = "character", length = length(unpaired_pvals))
+significance[(unpaired_pvals < bonf) & (paired_pvals < bonf)] <- "Both"
+significance[(unpaired_pvals < bonf) & (paired_pvals > bonf)] <- "Unpaired only"
+significance[(unpaired_pvals > bonf) & (paired_pvals < bonf)] <- "Paired only"
+significance[(unpaired_pvals > bonf) & (paired_pvals > bonf)] <- "Not significant"
+
+plot_df <- data.frame(unpaired_pvals, paired_pvals, Significance = significance, Features = names(paired_pvals))
+p <- ggplot(plot_df, aes(-log(unpaired_pvals), -log(paired_pvals))) + 
+  geom_point(size = 1, aes(colour = Significance))  + 
+  scale_color_manual(values=c("blue", " dark gray", "red", "orange"))
+print(p)
+plot_df %>% dplyr::filter(Significance != "Not significant") %>% 
+  dplyr::select(-unpaired_pvals) %>%
+  dplyr::select(-paired_pvals)
+```
+
