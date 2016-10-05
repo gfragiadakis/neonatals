@@ -1,6 +1,6 @@
-# Fetomaternal health (Neonatals)
+# Fetomaternal health (neonatals)
 Instructutions for exploring the scaffold maps, code, and raw data for Fragiadakis et. al, Journal Immunol, 2016
-Updated October 3rd, 2016 by GKFragiadakis
+Updated October 3rd, 2016 by G.K. Fragiadakis
 
 ## Scaffold Maps
 
