@@ -12,7 +12,7 @@ To explore the Scaffold Maps generated for this project, you will need three tin
 
 ## Access to the raw and gated data
 
-The raw and gated data are available through cytobank at the following URL: [insert url here]
+The raw and gated data are available through cytobank at the following URL: `https://cytobank.org/nolanlab/reports/`
 
 ## Access to the code used for this project
 
